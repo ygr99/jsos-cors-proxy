@@ -18,6 +18,28 @@
 const ACCESS_KEY = process.env.ACCESS_KEY || 'hello-world';
 const ALLOW_PRIVATE = process.env.ALLOW_PRIVATE_IP === 'true';
 
+/** 代理保留的 query 参数：不透传给目标站，由本服务消费。
+ *  x-cors-proxy-key   鉴权（头形态的等价物，供"零自定义头"请求使用）
+ *  x-upstream-referer 转发时注入 Referer —— 浏览器/WebContainer 的 fetch 禁止
+ *                     设置 Referer/User-Agent（会被静默丢弃），防盗链目标
+ *                     （如 B 站 CDN）缺 Referer 一律 403，只能经此透传
+ *  x-upstream-ua      转发时注入 User-Agent（同理） */
+const RESERVED_PARAMS = new Set(['x-cors-proxy-key', 'x-upstream-referer', 'x-upstream-ua']);
+const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
+/** 从目标 URL 上剥离保留参数，返回 { 参数名: 值 } */
+function extractReservedParams(u) {
+  const reserved = {};
+  for (const k of RESERVED_PARAMS) {
+    const v = u.searchParams.get(k);
+    if (v !== null) {
+      reserved[k] = v;
+      u.searchParams.delete(k);
+    }
+  }
+  return reserved;
+}
+
 const REQ_HOP_HEADERS = new Set([
   'host', 'connection', 'keep-alive', 'transfer-encoding', 'upgrade',
   'proxy-authenticate', 'proxy-authorization', 'te', 'trailer',
@@ -101,9 +123,7 @@ function resolveTargetFromUrl(reqUrl) {
   if (!/^https?:\/\//i.test(pathPart)) return null;
   try {
     const u = new URL(pathPart);
-    // 鉴权参数不透传给目标站
-    u.searchParams.delete('x-cors-proxy-key');
-    return u;
+    return { url: u, reserved: extractReservedParams(u) };
   } catch {
     return null;
   }
@@ -123,17 +143,18 @@ function resolveTargetFromQuery(req) {
   raw = String(raw).replace(/^(https?:)\/+/i, '$1//');
   if (!raw || !/^https?:\/\//i.test(raw)) return null;
 
-  // 顶层其余参数 = 目标自己的 query（rewrite 追加），拼回目标 URL；鉴权参数剥离
+  // 顶层其余参数 = 目标自己的 query（rewrite 追加），拼回目标 URL；保留参数剥离
   const extra = new URLSearchParams();
   for (const [k, v] of Object.entries(q)) {
-    if (k === 'vercel_path' || k === 'x-cors-proxy-key') continue;
+    if (k === 'vercel_path' || RESERVED_PARAMS.has(k)) continue;
     for (const item of Array.isArray(v) ? v : [v]) extra.append(k, item);
   }
   const qs = extra.toString();
   if (qs) raw += (raw.includes('?') ? '&' : '?') + qs;
 
   try {
-    return new URL(raw);
+    const u = new URL(raw);
+    return { url: u, reserved: extractReservedParams(u) };
   } catch {
     return null;
   }
@@ -171,10 +192,12 @@ export default async function handler(req, res) {
   }
 
   // 解析目标：形态 A（req.url 裸拼）→ 形态 B（rewrite 的 vercel_path）
-  const target = resolveTargetFromUrl(req.url) || resolveTargetFromQuery(req);
-  if (!target) {
+  const resolved = resolveTargetFromUrl(req.url) || resolveTargetFromQuery(req);
+  if (!resolved) {
     return sendJson(400, { error: 400, service: 'jsos-cors-proxy', message: '目标 URL 无效。用法: GET /{完整目标URL}，头 x-cors-proxy-key' });
   }
+  const target = resolved.url;
+  const reserved = resolved.reserved || {};
   if (!ALLOW_PRIVATE && isPrivateHost(target.hostname)) {
     return sendJson(403, { error: 403, message: '不允许代理私网/回环地址' });
   }
@@ -186,6 +209,11 @@ export default async function handler(req, res) {
   }
   // 目标主机与协议归属上游，不能把本服务的 Host 带过去
   delete headers.host;
+
+  // 保留参数消费：注入 Referer/UA（浏览器 fetch 发不出的头，防盗链目标必需）
+  if (reserved['x-upstream-referer']) headers['referer'] = reserved['x-upstream-referer'];
+  if (reserved['x-upstream-ua']) headers['user-agent'] = reserved['x-upstream-ua'];
+  else if (!headers['user-agent']) headers['user-agent'] = DEFAULT_UA;
 
   try {
     let body;
