@@ -69,22 +69,41 @@ function isPrivateHost(hostname) {
 /**
  * 形态 A：从 req.url 还原目标（catch-all / 直通部署形态）。
  * 官方协议是裸拼：/{https://target.com/path?query} —— req.url 的路径部分
- * 是目标 URL 主体，query 归目标。兼容两种变形：
- *   a. 目标被 encodeURIComponent 过（%3A%2F 开头）→ decode 一次
+ * 是目标 URL 主体，query 归目标。兼容三种变形：
+ *   a. 目标被 encodeURIComponent 过（%3A%2F 开头，encoded 形态——应用为绕开
+ *      Vercel 对双斜杠的 308 规范化而主动编码，全路径无裸 ?）→ 解码还原
  *   b. 中间层把 // 折叠成 /（https:/target.com）→ 修复协议斜杠
+ *   c. 代理层追加的 query（x-cors-proxy-key 鉴权参数）→ 从目标里剥离
  */
 function resolveTargetFromUrl(reqUrl) {
   let raw = reqUrl || '';
   if (raw.startsWith('/')) raw = raw.slice(1);
   if (!raw) return null;
-  if (/^https?%3A/i.test(raw)) {
-    try { raw = decodeURIComponent(raw); } catch { /* 保持原样 */ }
+  const qIdx = raw.indexOf('?');
+  let pathPart = qIdx === -1 ? raw : raw.slice(0, qIdx);
+  let queryPart = qIdx === -1 ? '' : raw.slice(qIdx + 1);
+  if (!pathPart) return null;
+
+  const encoded = /^https?%3A/i.test(pathPart);
+  if (encoded) {
+    // encoded 形态：目标整体（含其自身 query）被编码在路径里
+    try { pathPart = decodeURIComponent(pathPart); } catch { /* 保持原样 */ }
+    const sp = new URLSearchParams(queryPart);
+    sp.delete('x-cors-proxy-key');
+    const extra = sp.toString();
+    if (extra) pathPart += (pathPart.includes('?') ? '&' : '?') + extra;
+  } else if (queryPart) {
+    // 裸拼形态：target 自身的 query 原样归属目标
+    pathPart += '?' + queryPart;
   }
   // 修复被折叠的协议斜杠：https:/x → https://x（首处）
-  raw = raw.replace(/^(https?:)\/+/i, '$1//');
-  if (!/^https?:\/\//i.test(raw)) return null;
+  pathPart = pathPart.replace(/^(https?:)\/+/i, '$1//');
+  if (!/^https?:\/\//i.test(pathPart)) return null;
   try {
-    return new URL(raw);
+    const u = new URL(pathPart);
+    // 鉴权参数不透传给目标站
+    u.searchParams.delete('x-cors-proxy-key');
+    return u;
   } catch {
     return null;
   }
@@ -104,10 +123,10 @@ function resolveTargetFromQuery(req) {
   raw = String(raw).replace(/^(https?:)\/+/i, '$1//');
   if (!raw || !/^https?:\/\//i.test(raw)) return null;
 
-  // 顶层其余参数 = 目标自己的 query（rewrite 追加），拼回目标 URL
+  // 顶层其余参数 = 目标自己的 query（rewrite 追加），拼回目标 URL；鉴权参数剥离
   const extra = new URLSearchParams();
   for (const [k, v] of Object.entries(q)) {
-    if (k === 'vercel_path') continue;
+    if (k === 'vercel_path' || k === 'x-cors-proxy-key') continue;
     for (const item of Array.isArray(v) ? v : [v]) extra.append(k, item);
   }
   const qs = extra.toString();
@@ -140,7 +159,14 @@ export default async function handler(req, res) {
   }
 
   // 鉴权（对齐官方：x-cors-proxy-key 缺失或错误 → 401）
-  if ((req.headers['x-cors-proxy-key'] || '') !== ACCESS_KEY) {
+  // 支持两种携带方式：请求头（官方协议）/ URL query（应用发"无自定义头"的简单请求，
+  // 避免 WebContainer 容器内 Node fetch 的 preflight 被 Vercel 边缘 308 拦截）
+  const queryKey = (() => {
+    try { return new URL(req.url, 'http://local').searchParams.get('x-cors-proxy-key'); }
+    catch { return null; }
+  })();
+  const presentedKey = req.headers['x-cors-proxy-key'] || queryKey || '';
+  if (presentedKey !== ACCESS_KEY) {
     return sendJson(401, { error: 401, message: 'Invalid or missing x-cors-proxy-key' });
   }
 

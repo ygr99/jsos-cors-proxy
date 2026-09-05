@@ -44,6 +44,20 @@ const check = (name, cond, extra = '') => {
 
   r = await fetch(BASE + '/http://8.129.83.45:9001/', { headers: { 'x-cors-proxy-key': KEY } });
   check('直通: 裸 IP 目标放行', r.status === 200, `status=${r.status}`);
+
+  // encoded 形态（应用绕开双斜杠 308 的部署形态）
+  r = await fetch(BASE + '/' + encodeURIComponent('https://music.163.com/api/search/get?s=' + encodeURIComponent('晴天') + '&type=1&limit=1'), {
+    headers: { 'x-cors-proxy-key': KEY, Referer: 'https://music.163.com/' },
+  });
+  j = await r.json().catch(() => null);
+  check('直通: encoded 路径透传', r.status === 200 && j?.result?.songs?.length > 0, j?.result?.songs?.[0]?.name || '');
+
+  // query key 形态（无自定义头 → 不触发 preflight）
+  r = await fetch(BASE + '/' + encodeURIComponent('https://music.163.com/api/search/get?s=' + encodeURIComponent('晴天') + '&type=1&limit=1') + '?x-cors-proxy-key=' + KEY, {
+    headers: { Referer: 'https://music.163.com/' },
+  });
+  j = await r.json().catch(() => null);
+  check('直通: query key 简单请求（无 preflight）', r.status === 200 && j?.result?.songs?.length > 0, j?.result?.songs?.[0]?.name || '');
 }
 
 /* rewrite 形态：全部断言（线上真实形态） */
