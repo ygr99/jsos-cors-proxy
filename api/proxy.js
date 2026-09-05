@@ -67,13 +67,13 @@ function isPrivateHost(hostname) {
 /* ---------------- 目标 URL 解析 ---------------- */
 
 /**
- * 从代理请求里还原目标 URL。
+ * 形态 A：从 req.url 还原目标（catch-all / 直通部署形态）。
  * 官方协议是裸拼：/{https://target.com/path?query} —— req.url 的路径部分
  * 是目标 URL 主体，query 归目标。兼容两种变形：
  *   a. 目标被 encodeURIComponent 过（%3A%2F 开头）→ decode 一次
  *   b. 中间层把 // 折叠成 /（https:/target.com）→ 修复协议斜杠
  */
-function resolveTarget(reqUrl) {
+function resolveTargetFromUrl(reqUrl) {
   let raw = reqUrl || '';
   if (raw.startsWith('/')) raw = raw.slice(1);
   if (!raw) return null;
@@ -84,8 +84,37 @@ function resolveTarget(reqUrl) {
   raw = raw.replace(/^(https?:)\/+/i, '$1//');
   if (!/^https?:\/\//i.test(raw)) return null;
   try {
-    const u = new URL(raw);
-    return u;
+    return new URL(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 形态 B：从 rewrite 注入的 vercel_path query 还原目标。
+ * vercel.json: { "source": "/(.*)", "destination": "/api/proxy?vercel_path=$1" }
+ * Vercel 会把目标 URL 自身的 query 追加到顶层参数，重组时拼回去。
+ */
+function resolveTargetFromQuery(req) {
+  const q = req.query || {};
+  const vp = q.vercel_path;
+  if (vp === undefined) return null;
+  let raw = Array.isArray(vp) ? vp.join('/') : String(vp);
+  try { raw = decodeURIComponent(raw); } catch { /* 保持原样 */ }
+  raw = String(raw).replace(/^(https?:)\/+/i, '$1//');
+  if (!raw || !/^https?:\/\//i.test(raw)) return null;
+
+  // 顶层其余参数 = 目标自己的 query（rewrite 追加），拼回目标 URL
+  const extra = new URLSearchParams();
+  for (const [k, v] of Object.entries(q)) {
+    if (k === 'vercel_path') continue;
+    for (const item of Array.isArray(v) ? v : [v]) extra.append(k, item);
+  }
+  const qs = extra.toString();
+  if (qs) raw += (raw.includes('?') ? '&' : '?') + qs;
+
+  try {
+    return new URL(raw);
   } catch {
     return null;
   }
@@ -103,8 +132,10 @@ export default async function handler(req, res) {
     return res.end();
   }
 
-  // 健康检查
-  if (req.url === '/' || req.url === '' || req.url === '/favicon.ico') {
+  // 健康检查（直通形态的根路径 + rewrite 形态的 / 或空 vercel_path）
+  const vpRaw = req.query ? String(req.query.vercel_path ?? '') : null;
+  const rewrittenEmpty = vpRaw !== null && (vpRaw === '' || vpRaw === '/');
+  if (req.url === '/' || req.url === '' || req.url.startsWith('/favicon.ico') || rewrittenEmpty) {
     return sendJson(200, { ok: true, service: 'jsos-cors-proxy', usage: 'GET /{target-url} with x-cors-proxy-key header' });
   }
 
@@ -113,10 +144,10 @@ export default async function handler(req, res) {
     return sendJson(401, { error: 401, message: 'Invalid or missing x-cors-proxy-key' });
   }
 
-  // 解析目标
-  const target = resolveTarget(req.url);
+  // 解析目标：形态 A（req.url 裸拼）→ 形态 B（rewrite 的 vercel_path）
+  const target = resolveTargetFromUrl(req.url) || resolveTargetFromQuery(req);
   if (!target) {
-    return sendJson(400, { error: 400, message: '目标 URL 无效。用法: GET /{完整目标URL}' });
+    return sendJson(400, { error: 400, service: 'jsos-cors-proxy', message: '目标 URL 无效。用法: GET /{完整目标URL}，头 x-cors-proxy-key' });
   }
   if (!ALLOW_PRIVATE && isPrivateHost(target.hostname)) {
     return sendJson(403, { error: 403, message: '不允许代理私网/回环地址' });
