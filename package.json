@@ -1,0 +1,7 @@
+{
+  "name": "jsos-cors-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "JSOS 系统 CORS 代理的自部署版（协议兼容官方 cors-proxy.jsos.dev，增强：裸 IP 目标放行 + 私网 SSRF 防护），部署在 Vercel",
+  "type": "module"
+}
