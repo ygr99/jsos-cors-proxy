@@ -1,6 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
+    { "source": "/oss-sign", "destination": "/api/oss-sign" },
     { "source": "/(.*)", "destination": "/api/proxy?vercel_path=$1" }
   ],
   "functions": {
