@@ -24,7 +24,7 @@ const ALLOW_PRIVATE = process.env.ALLOW_PRIVATE_IP === 'true';
  *                     设置 Referer/User-Agent（会被静默丢弃），防盗链目标
  *                     （如 B 站 CDN）缺 Referer 一律 403，只能经此透传
  *  x-upstream-ua      转发时注入 User-Agent（同理） */
-const RESERVED_PARAMS = new Set(['x-cors-proxy-key', 'x-upstream-referer', 'x-upstream-ua']);
+const RESERVED_PARAMS = new Set(['x-cors-proxy-key', 'x-upstream-referer', 'x-upstream-ua', 'x-cors-proxy-debug']);
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 
 /** 从目标 URL 上剥离保留参数，返回 { 参数名: 值 } */
@@ -107,13 +107,20 @@ function resolveTargetFromUrl(reqUrl) {
   if (!pathPart) return null;
 
   const encoded = /^https?%3A/i.test(pathPart);
+  let queryReserved = {};
   if (encoded) {
-    // encoded 形态：目标整体（含其自身 query）被编码在路径里
+    // encoded 形态：目标 URL（含其自身 query）已完整编码在路径里 —— 顶层 query
+    // 全部是注入物（vercel_path / x-cors-proxy-key / x-cors-proxy-debug /
+    // x-upstream-*），一律不拼回目标。此前只删 x-cors-proxy-key、把 vercel_path
+    // 原样拼了回去，CDN 类目标对多余 query 无感，但严格的目标（坚果云 DAV）
+    // 会直接报 "the nustore path is not valid"（2026-09-23 实测）。
     try { pathPart = decodeURIComponent(pathPart); } catch { /* 保持原样 */ }
     const sp = new URLSearchParams(queryPart);
-    sp.delete('x-cors-proxy-key');
-    const extra = sp.toString();
-    if (extra) pathPart += (pathPart.includes('?') ? '&' : '?') + extra;
+    for (const k of RESERVED_PARAMS) {
+      const v = sp.get(k);
+      if (v !== null) queryReserved[k] = v;
+    }
+    queryPart = '';
   } else if (queryPart) {
     // 裸拼形态：target 自身的 query 原样归属目标
     pathPart += '?' + queryPart;
@@ -123,7 +130,7 @@ function resolveTargetFromUrl(reqUrl) {
   if (!/^https?:\/\//i.test(pathPart)) return null;
   try {
     const u = new URL(pathPart);
-    return { url: u, reserved: extractReservedParams(u) };
+    return { url: u, reserved: Object.assign(extractReservedParams(u), queryReserved) };
   } catch {
     return null;
   }
