@@ -60,7 +60,7 @@ const RESP_HOP_HEADERS = new Set([
 const CORS_HEADERS = {
   'access-control-allow-origin': '*',
   'access-control-allow-headers': '*',
-  'access-control-allow-methods': 'GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS',
+  'access-control-allow-methods': 'GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, PROPFIND, MKCOL',
   'access-control-expose-headers': '*',
   'access-control-max-age': '86400',
 };
