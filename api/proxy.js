@@ -198,6 +198,28 @@ export default async function handler(req, res) {
   }
   const target = resolved.url;
   const reserved = resolved.reserved || {};
+
+  // 调试模式（2026-09-23 加）：?x-cors-proxy-debug=1 → 不打上游，原样回显函数视角。
+  // 用于定位「Vercel 边缘对 %2F 路径的解码/折叠把目标 URL 弄脏」这类问题。
+  const isDebug = req.url.includes('x-cors-proxy-debug=1') ||
+    (req.query && req.query['x-cors-proxy-debug'] !== undefined);
+  if (isDebug) {
+    const dbgHeaders = {};
+    for (const [k, v] of Object.entries(req.headers)) {
+      if (!REQ_HOP_HEADERS.has(k.toLowerCase())) dbgHeaders[k] = v;
+    }
+    return sendJson(200, {
+      ok: true,
+      debug: {
+        method: req.method,
+        reqUrl: req.url,
+        query: req.query || null,
+        resolvedTarget: target.href,
+        reserved,
+        forwardedHeaders: dbgHeaders,
+      },
+    });
+  }
   if (!ALLOW_PRIVATE && isPrivateHost(target.hostname)) {
     return sendJson(403, { error: 403, message: '不允许代理私网/回环地址' });
   }
